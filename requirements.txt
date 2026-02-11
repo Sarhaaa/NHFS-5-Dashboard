@@ -2,9 +2,3 @@ streamlit
 pandas
 plotly
 openpyxl
-
-
-Sarhaaa/NFHS-5.githttps://github.com/Sarhaaa/NFHS-5.git
-
-
-https://github.com/Sarhaaa/NFHS-5.git
