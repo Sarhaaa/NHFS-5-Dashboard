@@ -11,7 +11,7 @@ def load_data():
     # 1. robust file path handling
     # This looks for the file in the same directory as the script
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    file_path = os.path.join(current_dir, "All India National Family Health Survey.xlsx - in.csv")
+    file_path = os.path.join(current_dir, "All India National Family Health Survey.csv")
     
     try:
         # Read the file without header first to locate structure
