@@ -1,181 +1,144 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
+import os
 
 # Set page config
 st.set_page_config(page_title="NFHS India Dashboard", layout="wide")
 
 @st.cache_data
 def load_data():
-    file_path = "All India National Family Health Survey.xlsx - in.csv"
+    # 1. robust file path handling
+    # This looks for the file in the same directory as the script
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    file_path = os.path.join(current_dir, "All India National Family Health Survey.xlsx - in.csv")
     
-    # The file structure is complex. We need to find the header row.
-    # Based on analysis, the row containing "Population and Household Profile" descriptions is likely the header.
-    # We'll read the file without a header first to locate it.
     try:
+        # Read the file without header first to locate structure
         df_raw = pd.read_csv(file_path, header=None)
     except FileNotFoundError:
-        st.error(f"File '{file_path}' not found. Please ensure the CSV file is in the same directory.")
+        st.error(f"⚠️ File not found! Please upload 'All India National Family Health Survey.xlsx - in.csv' to your GitHub repository in the same folder as app.py.")
         return None
 
-    # Find the row index where the 6th column (index 5) starts with "Population and Household Profile"
-    header_row_idx = None
+    # 2. Extract Data Rows (The states are at the top)
+    # We filter for rows that have 'NFHS-3' or 'NFHS-4' in the second column (index 1)
+    data_rows = df_raw[df_raw[1].isin(['NFHS-3', 'NFHS-4'])].copy()
+
+    # 3. Extract Header Row (The headers are at the bottom)
+    # We look for the specific row starting with "India/States/UTs"
+    header_row = None
     for i, row in df_raw.iterrows():
-        # Check if the column exists and is a string
-        if isinstance(row[5], str) and row[5].startswith("Population and Household Profile"):
-            header_row_idx = i
+        if str(row[0]).strip() == "India/States/UTs":
+            header_row = row
             break
             
-    if header_row_idx is None:
-        # Fallback: Try looking for "India/States/UTs" in the first column
-        for i, row in df_raw.iterrows():
-            if str(row[0]).strip() == "India/States/UTs":
-                header_row_idx = i
-                break
-    
-    if header_row_idx is None:
-        st.error("Could not determine the header row structure.")
+    if header_row is None:
+        st.error("Could not locate the header row (starting with 'India/States/UTs'). Check file format.")
         return None
 
-    # Reload data with the correct header
-    df = pd.read_csv(file_path, header=header_row_idx)
-    
-    # Rename the first three columns standardly if they aren't already
-    df.columns.values[0] = "State"
-    df.columns.values[1] = "Survey"
-    df.columns.values[2] = "Area"
+    # 4. Clean and Assign Headers
+    clean_headers = []
+    for val in header_row:
+        val_str = str(val).strip()
+        # Rename the first few fixed columns
+        if val_str == "India/States/UTs": clean_headers.append("State")
+        elif val_str == "Survey": clean_headers.append("Survey")
+        elif val_str == "Area": clean_headers.append("Area")
+        else: clean_headers.append(val_str)
 
-    # Filter out metadata rows (rows where Survey is not NFHS-3 or NFHS-4)
-    df = df[df['Survey'].isin(['NFHS-3', 'NFHS-4'])]
+    # Trim headers or data to match lengths
+    if len(clean_headers) > len(data_rows.columns):
+        clean_headers = clean_headers[:len(data_rows.columns)]
+    else:
+        data_rows = data_rows.iloc[:, :len(clean_headers)]
 
-    # Drop columns that are unnamed or have numbers as headers (artifacts of the file)
-    # We keep State, Survey, Area and columns with " - " in the name (Indicators)
+    data_rows.columns = clean_headers
+
+    # 5. Convert Numeric Columns
+    # Identify indicator columns (usually long strings or containing " - ")
+    # We exclude the first 3 identifier columns
     cols_to_keep = ['State', 'Survey', 'Area']
-    indicator_cols = [c for c in df.columns if isinstance(c, str) and " - " in c]
-    cols_to_keep.extend(indicator_cols)
+    indicator_cols = [c for c in data_rows.columns if c not in cols_to_keep and isinstance(c, str)]
     
-    df = df[cols_to_keep]
+    final_df = data_rows[cols_to_keep + indicator_cols].copy()
 
-    # Convert numeric columns, handling 'NA', '*', '()'
+    # Force numeric conversion, turning "NA", "*", "()" into NaN
     for col in indicator_cols:
-        df[col] = pd.to_numeric(df[col], errors='coerce')
+        final_df[col] = pd.to_numeric(final_df[col], errors='coerce')
 
-    return df
+    return final_df
 
+# Load Data
 data = load_data()
 
 if data is not None:
-    # --- Title and Intro ---
-    st.title("🇮🇳 National Family Health Survey (NFHS) Dashboard")
-    st.markdown("Explore data from NFHS-3 and NFHS-4 across Indian States and Union Territories.")
+    # --- Dashboard Title ---
+    st.title("🇮🇳 NFHS-3 & NFHS-4 Data Dashboard")
 
-    # --- Sidebar Filters ---
-    st.sidebar.header("Filters")
+    # --- Sidebar ---
+    st.sidebar.header("Filter Options")
 
-    # 1. State Filter
-    all_states = sorted(data['State'].unique())
-    selected_states = st.sidebar.multiselect("Select State(s)", all_states, default=all_states[:3])
-    if not selected_states:
-        selected_states = all_states # Select all if none selected to avoid empty charts
+    # State Selector
+    available_states = sorted(data['State'].astype(str).unique())
+    selected_states = st.sidebar.multiselect("Select State", available_states, default=available_states[:3])
+    if not selected_states: selected_states = available_states
 
-    # 2. Survey Filter
+    # Survey Selector
     selected_survey = st.sidebar.multiselect("Select Survey", data['Survey'].unique(), default=['NFHS-4'])
-    
-    # 3. Area Filter
-    selected_area = st.sidebar.multiselect("Select Area", data['Area'].unique(), default=['Total'])
+    if not selected_survey: selected_survey = ['NFHS-4']
 
-    # --- Indicator Selection Logic ---
-    # Extract categories from column headers (text before the first " - ")
+    # Area Selector
+    valid_areas = [x for x in data['Area'].unique() if pd.notna(x)]
+    selected_area = st.sidebar.multiselect("Select Area", valid_areas, default=['Total'])
+    if not selected_area: selected_area = valid_areas
+
+    # --- Metric Selection Logic ---
+    # Group indicators by category (text before " - ")
     indicator_cols = [c for c in data.columns if c not in ['State', 'Survey', 'Area']]
-    categories = sorted(list(set([col.split(" - ")[0] for col in indicator_cols])))
     
-    selected_category = st.sidebar.selectbox("Select Indicator Category", categories)
+    categories = sorted(list(set([c.split(" - ")[0] for c in indicator_cols if " - " in c])))
+    selected_category = st.sidebar.selectbox("Select Category", categories)
     
-    # Filter indicators belonging to selected category
-    category_indicators = [col for col in indicator_cols if col.startswith(selected_category)]
-    # Remove the category prefix for cleaner display in dropdown
-    display_indicators = {col.split(" - ", 1)[1]: col for col in category_indicators}
+    # Filter indicators for that category
+    cat_indicators = [c for c in indicator_cols if c.startswith(selected_category)]
     
-    selected_metric_name = st.sidebar.selectbox("Select Indicator", list(display_indicators.keys()))
-    selected_metric_col = display_indicators[selected_metric_name]
+    # Create a clean display map (remove the category prefix)
+    display_map = {c.split(" - ", 1)[1]: c for c in cat_indicators}
+    selected_metric_name = st.sidebar.selectbox("Select Indicator", sorted(list(display_map.keys())))
+    selected_metric_col = display_map[selected_metric_name]
 
-    # --- Data Filtering ---
+    # --- Filtering Data ---
     filtered_df = data[
         (data['State'].isin(selected_states)) &
         (data['Survey'].isin(selected_survey)) &
         (data['Area'].isin(selected_area))
     ]
 
-    # --- Main Dashboard Area ---
-    
-    # 1. Comparison Bar Chart
-    st.subheader(f"Comparison: {selected_metric_name}")
-    
+    # --- Visualizations ---
+    st.subheader(f"Analysis: {selected_metric_name}")
+
     if not filtered_df.empty:
-        # Sort values for better visualization
-        filtered_df_sorted = filtered_df.sort_values(by=selected_metric_col, ascending=False)
-        
-        # Dynamic color based on Survey or Area if multiple selected
-        color_col = 'Survey' if len(selected_survey) > 1 else 'State'
-        if len(selected_area) > 1: color_col = 'Area'
+        # Check if column has valid data
+        if filtered_df[selected_metric_col].isna().all():
+            st.warning("No data available for this indicator with selected filters.")
+        else:
+            # 1. Bar Chart
+            filtered_df = filtered_df.sort_values(selected_metric_col, ascending=False)
+            
+            fig = px.bar(
+                filtered_df,
+                x="State",
+                y=selected_metric_col,
+                color="Survey", 
+                barmode="group",
+                text_auto='.1f',
+                title=f"{selected_metric_name} by State"
+            )
+            fig.update_layout(xaxis_title="", yaxis_title="Value (%)")
+            st.plotly_chart(fig, use_container_width=True)
 
-        fig_bar = px.bar(
-            filtered_df_sorted,
-            x='State',
-            y=selected_metric_col,
-            color=color_col,
-            barmode='group',
-            hover_data=['Survey', 'Area'],
-            text_auto='.1f',
-            title=f"{selected_metric_name} by State"
-        )
-        fig_bar.update_layout(xaxis_title="State", yaxis_title="Value (%) or Rate")
-        st.plotly_chart(fig_bar, use_container_width=True)
+            # 2. Data Table
+            with st.expander("View Raw Data"):
+                st.dataframe(filtered_df)
     else:
-        st.info("No data available for the current filter selection.")
-
-    # 2. Metric Scorecards (Averages for selected selection)
-    st.markdown("---")
-    c1, c2, c3 = st.columns(3)
-    
-    with c1:
-        avg_val = filtered_df[selected_metric_col].mean()
-        st.metric(label=f"Average {selected_metric_name}", value=f"{avg_val:.2f}")
-    
-    with c2:
-        max_row = filtered_df.loc[filtered_df[selected_metric_col].idxmax()] if not filtered_df.empty and filtered_df[selected_metric_col].notna().any() else None
-        if max_row is not None:
-            st.metric(label="Highest Value", value=f"{max_row[selected_metric_col]:.1f}", delta=max_row['State'])
-    
-    with c3:
-        min_row = filtered_df.loc[filtered_df[selected_metric_col].idxmin()] if not filtered_df.empty and filtered_df[selected_metric_col].notna().any() else None
-        if min_row is not None:
-            st.metric(label="Lowest Value", value=f"{min_row[selected_metric_col]:.1f}", delta=min_row['State'], delta_color="inverse")
-
-    # 3. Survey Trends Comparison (Scatter/Dot Plot)
-    # Only useful if we have multiple surveys or areas for the same state
-    st.subheader("State-wise Variance Analysis")
-    
-    # Pivot for clearer comparison view if possible
-    if len(selected_survey) > 1 or len(selected_area) > 1:
-        fig_dot = px.scatter(
-            filtered_df,
-            x=selected_metric_col,
-            y="State",
-            color="Survey",
-            symbol="Area",
-            size_max=10,
-            title=f"Distribution of {selected_metric_name}",
-            height=max(400, len(selected_states) * 30)
-        )
-        fig_dot.update_traces(marker_size=12)
-        fig_dot.update_layout(xaxis_title=selected_metric_name, yaxis_title="State")
-        st.plotly_chart(fig_dot, use_container_width=True)
-    else:
-        st.caption("Select multiple Surveys or Areas to see variance charts.")
-
-    # 4. Data Table
-    st.markdown("---")
-    with st.expander("View Raw Data"):
-        st.dataframe(filtered_df[['State', 'Survey', 'Area', selected_metric_col]].style.highlight_max(axis=0))
+        st.info("Please select filters to generate the chart.")
